@@ -362,22 +362,19 @@ module DataMapper
         #   paths), thus they should bump the alias count if they collide
         def generate_path_aliases(paths)
           path_aliases = {}
-          alias_depths = {}
+          alias_depths = Hash.new(0)
 
           paths.each do |path|
-            path = path.dup
             hops = []
 
-            while path.any?
-              hops << path.shift
+            path.each do |hop|
+              hops << hop
 
-              debugger if $DONGS
+              path_aliases[hops.hash] ||= begin
+                alias_target                = hop.source_model.storage_name(name)
+                alias_depths[alias_target] += 1
 
-              unless path_aliases[hops]
-                alias_target                 = hops.last.source_model.storage_name(name)
-                alias_depths[alias_target] ||= 0
-                alias_depths[alias_target]  += 1
-                path_aliases[hops.dup]       = "#{alias_target}_#{alias_depths[alias_target]}"
+                "#{alias_target}_#{alias_depths[alias_target]}"
               end
             end
           end
@@ -408,8 +405,6 @@ module DataMapper
           #    - just need to override qualify with a string when comparison.links is present
 
           self.path_aliases = generate_path_aliases(query.links)
-          #puts pp(path_aliases.map { |k,v| [to_fullpath(k), v] }) if $DONGS
-          #debugger if $DONGS
 
           conditions, bind_values = conditions_statement(query.conditions, qualify)
           joins                   = join_statement(query, bind_values, qualify)
@@ -539,69 +534,43 @@ module DataMapper
         #
         # @api private
         #
-        # TODO: Nuke when join_statement is gold; this is just here for
-        # comparison/posterity.
-        def orig_join_statement(query, bind_values, qualify)
-          statements       = []
-          join_bind_values = []
-
-          target_alias = query.model.storage_name(name)
-          seen = { target_alias => 0 }
-
-          query.links.reverse_each do |relationship|
-            storage_name = relationship.source_model.storage_name(name)
-            source_alias = storage_name
-
-            statements << "INNER JOIN #{quote_name(storage_name)}"
-
-            if seen.key?(source_alias)
-              seen[source_alias] += 1
-              source_alias = "#{source_alias}_#{seen[source_alias]}"
-              statements << quote_name(source_alias)
-            else
-              seen[source_alias] = 0
-            end
-
-            statements << 'ON'
-
-            add_join_conditions(relationship, target_alias, source_alias, statements)
-            add_extra_join_conditions(relationship, target_alias, statements, join_bind_values)
-
-            target_alias = source_alias
-          end
-
-          # prepend the join bind values to the statement bind values
-          bind_values.unshift(*join_bind_values)
-
-          statements.join(' ')
-        end
-
-        # New join_statement that uses path_aliases to construct properly-scoped JOIN
-        # statements.
+        # NOTE: New join_statement that uses path_aliases to construct properly-scoped
+        # JOIN statements.
         def join_statement(query, bind_values, qualify)
           statements = []
           join_bind_values = []
 
-          # Some links are duplicates, so we filter out those so we don't end up
-          # re-aliasing the same table connection.
+          # Some links might be duplicates, so we note which paths we've visited so we
+          # don't end up re-aliasing the same table connection (error).
+          visited_hops = Set.new
+
           query.links.uniq.each do |path|
             target_alias = query.model.storage_name(name)
 
             hops = []
             path.each do |hop|
-              # NOTE: hop is a relationship
               hops << hop
 
               # [jpr5] knowtheory, this is where I think a problem lurks -- I think the
               # source_model isn't always inverted properly..  the issue is either here or
               # up in generate_path_aliases.
-              source_alias = self.path_aliases[hops]
+              source_alias = self.path_aliases[hops.hash]
               source_name  = hop.source_model.storage_name(name)
 
-              # Accumulate a join
-              statements << "INNER JOIN #{quote_name(source_name)} #{quote_name(source_alias)} ON"
-              statements << join_conditions(hop, target_alias, source_alias)
-              statements << extra_join_conditions(hop, target_alias, join_bind_values)
+              # If we haven't already visited this path, accumulate a join
+              #
+              # TODO: verify that skipping over an existing relationship like this doesn't
+              # F up the extra_join_conditions processing.  If Relationship#hash takes
+              # into account any additional scope, then we're good.  Or maybe it doesn't
+              # matter, since you can't have more than one Relationship of the same name
+              # on the same model.
+              hop_hash = hops.hash
+              unless visited_hops.include?(hop_hash)
+                visited_hops << hop_hash
+                statements << "INNER JOIN #{quote_name(source_name)} #{quote_name(source_alias)} ON"
+                statements << join_conditions(hop, target_alias, source_alias)
+                statements << extra_join_conditions(hop, target_alias, join_bind_values)
+              end
 
               target_alias = source_alias
             end
@@ -800,7 +769,7 @@ module DataMapper
           # path_aliases to find what table alias to use.  property_to_column_name()
           # catches when qualify is a string and just uses it as the table name instead
           # (seems like a hack someone made in a rush..).
-          if path_alias = self.path_aliases[comparison.links]
+          if path_alias = self.path_aliases[comparison.links.hash]
             qualify = path_alias
           end
           column_name = property_to_column_name(subject, qualify)
