@@ -309,6 +309,8 @@ module DataMapper
           column_name << quote_name(property.field)
         end
 
+        attr_accessor :path_aliases
+
         private
 
         # Adapters requiring a RETURNING syntax for INSERT statements
@@ -327,6 +329,62 @@ module DataMapper
           true
         end
 
+        # TODO: nuke -- here just for debugging.
+        # Examples: to_fullpath([hop]), to_fullpath(hops), to_fullpath(query.links[0])
+        def to_fullpath(links)
+          links.map { |l| ["#{l.target_model.storage_name(name)}<->#{l.source_model.storage_name(name)}"] }.flatten
+          #links.map { |l| ["#{l.field.underscore}<->#{l.inverse.field.underscore}"] }.flatten
+        end
+
+        # Given as paths:
+        # [
+        #  ["accounting_ledgers<->user", "user<->accounts"],
+        #  ["accounting_ledgers<->user", "user<->user_programs"],
+        #  ["accounting_ledgers<->program"],
+        # ]
+        #
+        # Produce:
+        # {
+        #   ["accounting_ledgers<->user"]                         => 'user_1',
+        #   ["accounting_ledgers<->user", "user<->accounts"]      => 'accounts_1',
+        #   ["accounting_ledgers<->user", "user<->user_programs"] => "user_programs_1"
+        #   ["accounting_ledgers<->program"]                      => 'program_1'
+        # }
+        #
+        # paths = list of all link chains; maps to: Ooga.all('foo.bar.blort' => true, 'balls' => 1)
+        # path  = full link chain; maps to: 'foo.bar.blort' => true
+        # hops  = 1->full links (cumulative); maps to: ['foo.bar'], ['foo.bar', 'bar.blort']
+        # hop   = a single link (individual); maps to: ['foo.bar']
+        #
+        # - each hop represents a join and thus something that must be aliased
+        # - inside a path, all hops are unique, thus all deserve their own aliases
+        # - across all paths, links are not unique (because they occur within different
+        #   paths), thus they should bump the alias count if they collide
+        def generate_path_aliases(paths)
+          path_aliases = {}
+          alias_depths = {}
+
+          paths.each do |path|
+            path = path.dup
+            hops = []
+
+            while path.any?
+              hops << path.shift
+
+              debugger if $DONGS
+
+              unless path_aliases[hops]
+                alias_target                 = hops.last.source_model.storage_name(name)
+                alias_depths[alias_target] ||= 0
+                alias_depths[alias_target]  += 1
+                path_aliases[hops.dup]       = "#{alias_target}_#{alias_depths[alias_target]}"
+              end
+            end
+          end
+
+          return path_aliases
+        end
+
         # Constructs SELECT statement for given query,
         #
         # @return [String] SELECT statement as a string
@@ -340,12 +398,26 @@ module DataMapper
             fields.select { |property| property.kind_of?(Property) }
           end
 
-          conditions_statement, bind_values = conditions_statement(query.conditions, qualify)
+          # [jpr5] Approach:
+          #  - generate aliases for any links
+          #  - walk link groups to build joins
+          #    - the alias list is also the join list, but is now a flat list (what links was before)
+          #  - walk the conditions list to build the condition statement
+          #    - the comparisons that have .links will use path_aliases as their src table
+          #    - everything else uses source_model's storage_name(name)
+          #    - just need to override qualify with a string when comparison.links is present
+
+          self.path_aliases = generate_path_aliases(query.links)
+          #puts pp(path_aliases.map { |k,v| [to_fullpath(k), v] }) if $DONGS
+          #debugger if $DONGS
+
+          conditions, bind_values = conditions_statement(query.conditions, qualify)
+          joins                   = join_statement(query, bind_values, qualify)
 
           statement = "SELECT #{columns_statement(fields, qualify)}"
           statement << " FROM #{quote_name(query.model.storage_name(name))}"
-          statement << " #{join_statement(query, bind_values, qualify)}"   if qualify
-          statement << " WHERE #{conditions_statement}"                    unless conditions_statement.blank?
+          statement << " #{joins}"                                         if qualify
+          statement << " WHERE #{conditions}"                              unless conditions.blank?
           statement << " GROUP BY #{columns_statement(group_by, qualify)}" if group_by && group_by.any?
           statement << " ORDER BY #{order_statement(order_by, qualify)}"   if order_by && order_by.any?
 
@@ -466,7 +538,10 @@ module DataMapper
         #   joins clause
         #
         # @api private
-        def join_statement(query, bind_values, qualify)
+        #
+        # TODO: Nuke when join_statement is gold; this is just here for
+        # comparison/posterity.
+        def orig_join_statement(query, bind_values, qualify)
           statements       = []
           join_bind_values = []
 
@@ -501,22 +576,63 @@ module DataMapper
           statements.join(' ')
         end
 
-        def add_join_conditions(relationship, target_alias, source_alias, statements)
-          statements << relationship.target_key.zip(relationship.source_key).map do |target_property, source_property|
+        # New join_statement that uses path_aliases to construct properly-scoped JOIN
+        # statements.
+        def join_statement(query, bind_values, qualify)
+          statements = []
+          join_bind_values = []
+
+          # Some links are duplicates, so we filter out those so we don't end up
+          # re-aliasing the same table connection.
+          query.links.uniq.each do |path|
+            target_alias = query.model.storage_name(name)
+
+            hops = []
+            path.each do |hop|
+              # NOTE: hop is a relationship
+              hops << hop
+
+              # [jpr5] knowtheory, this is where I think a problem lurks -- I think the
+              # source_model isn't always inverted properly..  the issue is either here or
+              # up in generate_path_aliases.
+              source_alias = self.path_aliases[hops]
+              source_name  = hop.source_model.storage_name(name)
+
+              # Accumulate a join
+              statements << "INNER JOIN #{quote_name(source_name)} #{quote_name(source_alias)} ON"
+              statements << join_conditions(hop, target_alias, source_alias)
+              statements << extra_join_conditions(hop, target_alias, join_bind_values)
+
+              target_alias = source_alias
+            end
+          end
+
+          # prepend the join bind values to the statement bind values
+          bind_values.unshift(*join_bind_values)
+
+          return statements.join(' ')
+        end
+
+        def join_conditions(relationship, target_alias, source_alias)
+          return relationship.target_key.zip(relationship.source_key).map do |target_property, source_property|
             "#{property_to_column_name(target_property, target_alias)} = #{property_to_column_name(source_property, source_alias)}"
           end.join(' AND ')
         end
 
-        def add_extra_join_conditions(relationship, target_alias, statements, bind_values)
+        def extra_join_conditions(relationship, target_alias, bind_values)
           conditions = DataMapper.repository(name).scope do
             relationship.target_model.all(relationship.query).query.conditions
           end
 
-          return if conditions.nil?
+          return '' if conditions.nil?
 
+          # FIXME: [jpr5] wtf is this and how does it come to be?  I need concrete example
+          # to test properly.  Though I don't think I broke it because I maintained how
+          # the bind_values are generated by conditions_statement's first call up in
+          # select_statement, and again in join_statement.
           extra_statement, extra_bind_values = conditions_statement(conditions, target_alias)
-          statements << "AND #{extra_statement}"
-          bind_values.concat(extra_bind_values)
+          bind_values += extra_bind_values
+          return "AND #{extra_statement}"
         end
 
         # Constructs where clause
@@ -679,8 +795,16 @@ module DataMapper
             return []  # match everything
           end
 
-          operator    = comparison_operator(comparison)
+          # NOTE: This relies on the dm-core fix_joins work -- conditions (comparisons)
+          # that have links references can just simply be looked up in our generated
+          # path_aliases to find what table alias to use.  property_to_column_name()
+          # catches when qualify is a string and just uses it as the table name instead
+          # (seems like a hack someone made in a rush..).
+          if path_alias = self.path_aliases[comparison.links]
+            qualify = path_alias
+          end
           column_name = property_to_column_name(subject, qualify)
+          operator    = comparison_operator(comparison)
 
           # if operator return value contains ? then it means that it is function call
           # and it contains placeholder (%s) for property name as well (used in Oracle adapter for regexp operator)
