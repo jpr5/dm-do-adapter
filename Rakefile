@@ -12,11 +12,12 @@ begin
     gem.email       = 'dan.kubb@gmail.com'
     gem.homepage    = 'http://github.com/datamapper/%s' % gem.name
     gem.authors     = [ 'Dan Kubb' ]
+    gem.has_rdoc    = 'yard'
 
     gem.rubyforge_project = 'datamapper'
 
-    gem.add_dependency 'data_objects', '~> 0.10.1'
-    gem.add_dependency 'dm-core',      '~> 1.0.0'
+    gem.add_dependency 'data_objects', '~> 0.10.2'
+    gem.add_dependency 'dm-core',      '~> 1.0.2'
 
     gem.add_development_dependency 'rspec', '~> 1.3'
   end
