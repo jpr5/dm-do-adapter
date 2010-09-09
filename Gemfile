@@ -1,12 +1,15 @@
 source 'http://rubygems.org'
 
 DATAMAPPER = 'git://github.com/datamapper'
-DM_VERSION = '~> 1.0.0'
-DO_VERSION = '~> 0.10.3'
+DM_VERSION = '~> 1.0.2'
+DO_VERSION = '~> 0.10.2'
 
 group :runtime do # Runtime dependencies (as in the gemspec)
 
-  gem 'data_objects',    DO_VERSION, :git => "#{DATAMAPPER}/do.git"
+  do_options = {}
+  do_options[:git] = "#{DATAMAPPER}/do.git" if ENV['DO_GIT'] == 'true'
+
+  gem 'data_objects',    DO_VERSION, do_options.dup
   gem 'dm-core',         DM_VERSION, :git => "#{DATAMAPPER}/dm-core.git"
 
 end
@@ -22,9 +25,9 @@ end
 group :datamapper do # We need this because we want to pin these dependencies to their git master sources
 
   if ENV['EXTLIB']
-    gem 'extlib',        '~> 0.9.15',      :git => "#{DATAMAPPER}/extlib.git", :require => nil
+    gem 'extlib',        '~> 0.9.15', :git => "#{DATAMAPPER}/extlib.git", :require => nil
   else
-    gem 'activesupport', '~> 3.0.0.beta3', :git => 'git://github.com/rails/rails.git', :require => nil
+    gem 'activesupport', '~> 3.0.0',  :git => 'git://github.com/rails/rails.git', :branch => '3-0-stable', :require => nil
   end
 
 end
