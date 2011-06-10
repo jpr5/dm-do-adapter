@@ -29,7 +29,11 @@ share_examples_for 'A DataObjects Adapter' do
 
   def log_output
     @log.rewind
-    @log.read.chomp.gsub(/^\s+~ \(\d+\.?\d*\)\s+/, '').split("\n")
+    output = @log.read
+    output.chomp!
+    output.gsub!(/\A\s+~ \(\d+\.?\d*\)\s+/, '')
+    output.gsub!(/\Acom\.\w+\.jdbc\.JDBC4PreparedStatement@[^:]+:\s+/, '') if @jruby
+    output.split($/)
   end
 
   def supports_default_values?
@@ -95,7 +99,7 @@ share_examples_for 'A DataObjects Adapter' do
         elsif @sql_server
           /^SET IDENTITY_INSERT \"articles\" ON INSERT INTO "articles" \("id"\) VALUES \(.{1,2}\) SET IDENTITY_INSERT \"articles\" OFF $/i
         else
-          /^INSERT INTO "articles" \("id"\) VALUES \(.{1,2}\)$/i
+          /^INSERT INTO "articles" \("id"\) VALUES \(('.{1,2}'|.{1,2})\)$/i
         end
 
         log_output.first.should =~ regexp
